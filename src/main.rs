@@ -1,73 +1,36 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::{
-    ffi::{c_void, OsStr, OsString},
+    ffi::c_void,
     fs::File,
     io::{BufRead, BufReader},
-    os::windows::process::CommandExt,
 };
 
 use anti_window_snap::anti_window;
 use dashmap::DashMap;
-use fltk::enums::{Color, Event};
-use fltk::image::PngImage;
-use fltk::input::Input;
-use fltk::{app, enums, prelude::*, window::Window};
-use fltk::{app::Scheme, enums::Align};
-use fltk::{button, dialog, frame, group, input, text};
 use once_cell::sync::Lazy;
 use windows::{
-    core::w,
     Win32::{
-        Foundation::{BOOL, COLORREF, HWND, POINT, RECT},
-        Graphics::Gdi::{
-            ClientToScreen, CombineRgn, CreateRectRgn, CreateRectRgnIndirect, CreateSolidBrush, FillRgn, GetDC, GetWindowDC, InflateRect, InvertRect,
-            OffsetRect, RedrawWindow, ReleaseDC, SetRect, RDW_FRAME, RDW_INTERNALPAINT, RDW_INVALIDATE,
-            RDW_UPDATENOW, RGN_DIFF,
-        },
-        System::LibraryLoader::GetModuleHandleW,
+        Foundation::{BOOL, HWND},
         UI::{
             Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
             WindowsAndMessaging::{
-                EnumWindows, GetClientRect, GetParent, GetPhysicalCursorPos, GetWindowLongPtrW,
-                GetWindowRect, GetWindowTextW, LoadCursorW, SetCursor, WindowFromPhysicalPoint,
-                CHILDID_SELF, EVENT_OBJECT_CREATE, EVENT_OBJECT_NAMECHANGE, GWL_STYLE,
-                OBJID_WINDOW, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNTHREAD,
-                WS_CHILD,
+                GetWindowTextW, CHILDID_SELF, EVENT_OBJECT_CREATE, EVENT_OBJECT_NAMECHANGE,
+                OBJID_WINDOW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNTHREAD,
             },
         },
     },
 };
-mod helper;
-
-#[derive(Debug, PartialEq, Eq)]
-enum STATE {
-    UnProcessed,
-    Processing,
-    Processed,
-    Completed,
-}
 
 static mut WINDOW_CACHE: Lazy<DashMap<u64, (STATE, STATE)>> = Lazy::new(|| initialize_map());
 static mut ROOT_WINDOW_CACHE: Lazy<DashMap<u64, bool>> = Lazy::new(|| initialize_root_window_map());
 static mut CONFIG_WINDOW_TITLES: Vec<String> = Vec::new();
-static mut LABELS_CACHE: Lazy<DashMap<String, frame::Frame>> = Lazy::new(|| initialize_tips_map());
-
-fn initialize_map() -> DashMap<u64, (STATE, STATE)> {
-    DashMap::new()
-}
-fn initialize_root_window_map() -> DashMap<u64, bool> {
-    DashMap::new()
-}
-
-fn initialize_tips_map() -> DashMap<String, frame::Frame> {
-    DashMap::new()
-}
 
 fn main() {
+    // Read config file
     let path = std::env::current_dir()
         .unwrap_or_default()
         .join("config.txt");
-    let mut txt_buf = text::TextBuffer::default();
+    
     if path.exists() {
         let file = File::open(path).unwrap();
         let reader = BufReader::new(file);
@@ -76,109 +39,14 @@ fn main() {
             let line = line_result.unwrap();
             if !line.trim().is_empty() {
                 unsafe {
-                    // println!("已加载配置:{}", line);
                     CONFIG_WINDOW_TITLES.push(line.clone());
-                    txt_buf.append((line + "\n").as_str());
+                    println!("Loaded config: {}", line);
                 }
-            };
+            }
         }
     }
 
-    let app = app::App::default().with_scheme(Scheme::Gtk);
-    let mut wind = Window::default().with_size(640, 380).center_screen();
-
-    let mut col = group::Flex::default_fill().column();
-    let mut mp = group::Flex::default().row();
-    frame::Frame::default();
-
-    let mut left_panel_layout = group::Flex::default().column();
-
-    let mut tip1_label = frame::Frame::default()
-        .with_label("窗口标题一行一个")
-        .with_align(enums::Align::Inside | enums::Align::Left);
-    tip1_label.set_label_color(Color::Red);
-    let mut txt = text::TextEditor::default().with_size(190, 290);
-    txt.set_buffer(txt_buf.clone());
-    txt.set_text_color(Color::DarkGreen);
-    txt.set_scrollbar_align(Align::Right);
-
-    let mut brow = group::Flex::default().row();
-    {
-        frame::Frame::default();
-        let tip2_label = frame::Frame::default()
-            .with_label("保存位置config.txt")
-            .with_align(enums::Align::Inside | enums::Align::Left);
-        let mut save = create_button("保存");
-        save.set_callback(move |_| {
-            let path = std::env::current_dir()
-                .unwrap_or_default()
-                .join("config.txt");
-            match txt_buf.clone().save_file(path) {
-                Ok(_) => {
-                    unsafe {
-                        CONFIG_WINDOW_TITLES.clear();
-                    }
-                    let content = txt_buf.text();
-                    for line in content.lines() {
-                        if !line.trim().is_empty() {
-                            unsafe {
-                                CONFIG_WINDOW_TITLES.push(line.to_string());
-                            }
-                        };
-                    }
-                    do_allwindow();
-                }
-                Err(_) => {
-                    dialog::message_default("保存失败");
-                }
-            }
-        });
-        brow.fixed(&tip2_label, 120);
-        brow.fixed(&save, 60);
-        brow.end();
-    }
-    left_panel_layout.fixed(&tip1_label, 30);
-    left_panel_layout.fixed(&txt, 300);
-    left_panel_layout.fixed(&brow, 30);
-    left_panel_layout.end();
-
-    let spacer = frame::Frame::default();
-
-    let mut right_panel_layout = group::Flex::default().column();
-    right_panel(&mut right_panel_layout);
-    right_panel_layout.end();
-
-    frame::Frame::default();
-    mp.fixed(&left_panel_layout, 300);
-    mp.fixed(&spacer, 10);
-    mp.fixed(&right_panel_layout, 300);
-    frame::Frame::default();
-    mp.end();
-    frame::Frame::default();
-    col.fixed(&mp, 500);
-
-    col.end();
-    // wind.resizable(&col);
-    wind.set_color(enums::Color::from_rgb(250, 250, 250));
-    wind.end();
-
-    // wind.size_range(600, 400, 1024, 768);
-
-    wind.show();
-    helper::set_window_deny_capture(wind.raw_handle() as _, true);
-    let image = PngImage::from_data(&helper::load_icon_to_png("IDI_1").unwrap()).unwrap();
-    wind.set_icon(Some(image));
-    wind.set_label(
-        format!(
-            "{} {}",
-            wind.raw_handle() as u64,
-            "  开源地址:github.com/pkptzx/AntiWindowSnap"
-        )
-        .as_str(),
-    );
-
-    do_allwindow();
-
+    // Set up window event hook
     let hook = unsafe {
         SetWinEventHook(
             EVENT_OBJECT_CREATE,
@@ -190,6 +58,30 @@ fn main() {
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNTHREAD,
         )
     };
+    assert!(!hook.is_invalid(), "Failed to install hook");
+
+    // Process existing windows
+    do_allwindow();
+
+    // Create a message loop to keep the application running
+    unsafe {
+        let mut msg = std::mem::zeroed();
+        while windows::Win32::UI::WindowsAndMessaging::GetMessageW(
+            &mut msg,
+            HWND(0),
+            0,
+            0,
+        ).as_bool()
+        {
+            windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+            windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+        }
+        
+        UnhookWinEvent(hook);
+    }
+}
+
+// Keep the existing helper functions and callbacks...
     assert!(!hook.is_invalid(), "Failed to install hook");
 
     wind.set_callback(move |_| {
